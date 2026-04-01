@@ -89,130 +89,44 @@ impl Server {
 
         let tree = document.tree().clone();
         let Position { line, character } = params.text_document_position_params.position;
-        let token_index = document.position_to_token_index(line, character);
+        let token_index = document.position_to_token(line, character);
         let Some(container) = document.enclosing_container(token_index) else {
             let msg = format!("failed to find enclosing container at ({line}, {character})");
             return Err(ResponseError::new(ErrorCode::REQUEST_FAILED, msg));
         };
-        let doc_node = document.enclosing_nodes(token_index).last().unwrap();
+        let Some(doc_node) = document.enclosing_nodes(token_index).last() else {
+            let msg = format!("failed to find enclosing node at ({line}, {character})");
+            return Err(ResponseError::new(ErrorCode::REQUEST_FAILED, msg));
+        };
 
         let handle = Handle(path.clone(), tree.clone());
         let this = Node(handle.clone(), container.index);
         let node = Node(handle.clone(), doc_node.index);
 
-        let (mut def, expr) = match tree.node_tag(node.index()) {
-            NodeTag::Identifier => {
-                let name_token = tree.node_main_token(node.index());
-                if token_index != name_token {
-                    return Ok(None);
-                }
-                let mut analyzer = self.analyzer(this);
-                let mut member = None;
-                let binding = analyzer.resolve_identifier(&node, Some(&mut member));
-                let def = match member {
-                    Some(member) => member.def_slice(&tree),
-                    None => tree.token_slice(token_index),
-                };
-                (Cow::Borrowed(def), binding.expr())
+        let mut analyzer = self.analyzer(this);
+        let mut member_info = None;
+        let opt_expr = analyzer.resolve_from_token(&node, token_index, Some(&mut member_info));
+        let Some(expr) = opt_expr else {
+            return Ok(None);
+        };
+
+        let mut tree = tree;
+        let mut def = match member_info {
+            Some((member_tree, member)) => {
+                tree = member_tree;
+                member.def_slice(&tree)
             }
-            NodeTag::GlobalVarDecl
-            | NodeTag::LocalVarDecl
-            | NodeTag::SimpleVarDecl
-            | NodeTag::AlignedVarDecl => {
-                let mut_token = tree.node_main_token(node.index());
-                let name_token = TokenIndex(mut_token.0 + 1);
-                if token_index != name_token {
-                    return Ok(None);
-                }
-                let member = Member::Variable(node.index());
-                let def = member.def_slice(&tree);
-                let mut analyzer = self.analyzer(this);
-                let binding = analyzer.resolve_decl_access_this(member);
-                (Cow::Borrowed(def), binding.expr())
-            }
-            NodeTag::FnProtoSimple
-            | NodeTag::FnProtoMulti
-            | NodeTag::FnProtoOne
-            | NodeTag::FnProto
-            | NodeTag::FnDecl => 'blk: {
-                let fn_token = tree.node_main_token(node.index());
-                let name_token = TokenIndex(fn_token.0 + 1);
-                if token_index == name_token {
-                    let member = Member::Function(node.index());
-                    let def = member.def_slice(&tree);
-                    let mut analyzer = self.analyzer(this);
-                    let binding = analyzer.resolve_decl_access_this(member);
-                    break 'blk (Cow::Borrowed(def), binding.expr());
-                }
-                let colon_token = TokenIndex(token_index.0 + 1);
-                let param_token = TokenIndex(token_index.0 + 2);
-                if tree.token_count() >= param_token.0
-                    && tree.token_tag(token_index) == TokenTag::Identifier
-                    && tree.token_tag(colon_token) == TokenTag::Colon
-                {
-                    let mut opt_param = None;
-                    for sub_node in doc_node.enclosing_nodes(&tree, param_token) {
-                        if tree.first_token(sub_node.index) == param_token {
-                            opt_param = Some(sub_node.index);
-                            break;
-                        }
-                    }
-                    let Some(param) = opt_param else {
-                        let def = tree.token_slice(token_index);
-                        let expr = Expr(Type::Unknown, Value::Unknown);
-                        break 'blk (Cow::Borrowed(def), expr);
-                    };
-                    let member = Member::FunctionParameter(param);
-                    let def = member.def_slice(&tree);
-                    let mut analyzer = self.analyzer(this);
-                    let binding = analyzer.resolve_decl_access_this(member);
-                    break 'blk (Cow::Borrowed(def), binding.expr());
-                }
-                return Ok(None);
-            }
-            NodeTag::ContainerFieldInit
-            | NodeTag::ContainerFieldAlign
-            | NodeTag::ContainerField => {
-                let name_token = tree.node_main_token(node.index());
-                if token_index != name_token {
-                    return Ok(None);
-                }
-                let member = Member::Field(node.index());
-                let def = member.def_slice(&tree);
-                let mut analyzer = self.analyzer(this);
-                let expr = analyzer.resolve_field_access_this(Value::Unknown, node.index());
-                (Cow::Borrowed(def), expr)
-            }
-            NodeTag::FieldAccess => {
-                let NodeAndToken(lhs, rhs) = unsafe { tree.node_data_unchecked(node.index()) };
-                if token_index != rhs {
-                    return Ok(None);
-                }
-                let mut analyzer = self.analyzer(this);
-                let mut member_info = None;
-                let binding = analyzer.resolve_member_access(&node, Some(&mut member_info));
-                match member_info {
-                    Some((tree, member)) => {
-                        let def = Vec::from(member.def_slice(&tree));
-                        (Cow::Owned(def), binding.expr())
-                    }
-                    None => {
-                        let def = tree.token_slice(token_index);
-                        (Cow::Borrowed(def), binding.expr())
-                    }
-                }
-            }
-            _ => return Ok(None),
+            None => tree.token_slice(token_index),
         };
 
         if let Expr(Type::Type, Value::Type(Type::Interned(index))) = expr
             && let Some(InternedType::Container(container_type)) = self.ip.get_type(index)
         {
-            def = Cow::Borrowed(container_type.source());
+            def = container_type.source();
         }
 
         let mut s = String::new();
-        let def = String::from_utf8_lossy(&def);
+        let def = String::from_utf8_lossy(def);
         let _ = write!(s, "```zig\n{def}\n```\n");
         match expr {
             Expr(Type::Type, _) => {
@@ -246,7 +160,7 @@ async fn main() {
             ip: InternPool::new(),
             cache: AnalyzerCache::new(),
             documents: DocumentStore::new(),
-            env: Env::find().unwrap(),
+            env: Env::find().expect("unable to find Zig"),
         });
         router
             .request::<request::Initialize, _>(|_, params| async move {
