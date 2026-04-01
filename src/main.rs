@@ -18,9 +18,14 @@ use async_lsp::{ClientSocket, ErrorCode, ResponseError};
 use lsp_types::DidChangeTextDocumentParams;
 use lsp_types::DidCloseTextDocumentParams;
 use lsp_types::DidOpenTextDocumentParams;
+use lsp_types::GotoDefinitionParams;
+use lsp_types::Location;
+use lsp_types::Range;
 use lsp_types::TextDocumentContentChangeEvent;
+use lsp_types::TextDocumentPositionParams;
 use lsp_types::TextDocumentSyncCapability;
 use lsp_types::TextDocumentSyncKind;
+use lsp_types::request::GotoTypeDefinitionResponse;
 use lsp_types::{
     Hover, HoverContents, HoverParams, HoverProviderCapability, InitializeResult, MarkedString,
     MessageType, OneOf, Position, ServerCapabilities, ShowMessageParams, Url, notification,
@@ -74,8 +79,11 @@ impl Server {
         self.cache.clear();
     }
 
-    fn hover(&mut self, params: HoverParams) -> Result<Option<String>, ResponseError> {
-        let uri = params.text_document_position_params.text_document.uri;
+    fn foobar(
+        &mut self,
+        params: TextDocumentPositionParams,
+    ) -> Result<(Node, Node, TokenIndex), ResponseError> {
+        let uri = params.text_document.uri;
         let Ok(path) = uri.to_file_path() else {
             let msg = format!("invalid file path: {uri}");
             return Err(ResponseError::new(ErrorCode::REQUEST_FAILED, msg));
@@ -88,7 +96,7 @@ impl Server {
         };
 
         let tree = document.tree().clone();
-        let Position { line, character } = params.text_document_position_params.position;
+        let Position { line, character } = params.position;
         let token_index = document.position_to_token(line, character);
         let Some(container) = document.enclosing_container(token_index) else {
             let msg = format!("failed to find enclosing container at ({line}, {character})");
@@ -103,6 +111,12 @@ impl Server {
         let this = Node(handle.clone(), container.index);
         let node = Node(handle.clone(), doc_node.index);
 
+        Ok((this, node, token_index))
+    }
+
+    fn hover(&mut self, params: HoverParams) -> Result<Option<String>, ResponseError> {
+        let (this, node, token_index) = self.foobar(params.text_document_position_params)?;
+
         let mut analyzer = self.analyzer(this);
         let mut member_info = None;
         let opt_expr = analyzer.resolve_from_token(&node, token_index, Some(&mut member_info));
@@ -110,20 +124,29 @@ impl Server {
             return Ok(None);
         };
 
-        let mut tree = tree;
-        let mut def = match member_info {
-            Some((member_tree, member)) => {
-                tree = member_tree;
-                member.def_slice(&tree)
+        let mut handle = node.handle().clone();
+        let def = 'blk: {
+            if let Expr(Type::Type, Value::Type(Type::Interned(index))) = expr
+                && let Some(InternedType::Container(container_type)) = self.ip.get_type(index)
+            {
+                let node = container_type.this();
+                handle = node.handle().clone();
+                let tree = handle.tree();
+                break 'blk tree.node_source(node.index());
             }
-            None => tree.token_slice(token_index),
-        };
 
-        if let Expr(Type::Type, Value::Type(Type::Interned(index))) = expr
-            && let Some(InternedType::Container(container_type)) = self.ip.get_type(index)
-        {
-            def = container_type.source();
-        }
+            match member_info {
+                Some((member_handle, member)) => {
+                    handle = member_handle;
+                    let tree = handle.tree();
+                    member.def_slice(tree)
+                }
+                None => {
+                    let tree = handle.tree();
+                    tree.token_slice(token_index)
+                }
+            }
+        };
 
         let mut s = String::new();
         let def = String::from_utf8_lossy(def);
@@ -144,6 +167,54 @@ impl Server {
         }
         Ok(Some(s))
     }
+
+    fn goto_definition(
+        &mut self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoTypeDefinitionResponse>, ResponseError> {
+        let (this, node, token_index) = self.foobar(params.text_document_position_params)?;
+
+        let mut analyzer = self.analyzer(this);
+        let mut member_info = None;
+        let opt_expr = analyzer.resolve_from_token(&node, token_index, Some(&mut member_info));
+        let Some(expr) = opt_expr else {
+            return Ok(None);
+        };
+
+        let (handle, token) = 'blk: {
+            if let Expr(Type::Type, Value::Type(Type::Interned(index))) = expr
+                && let Some(InternedType::Container(container_type)) = self.ip.get_type(index)
+            {
+                let node = container_type.this();
+                let handle = node.handle().clone();
+                let tree = handle.tree();
+                let token = tree.first_token(node.index());
+                break 'blk (handle, token);
+            }
+
+            let Some((handle, member)) = member_info else {
+                return Ok(None);
+            };
+
+            let tree = handle.tree();
+            let token = member.name_token(tree);
+            (handle, token)
+        };
+
+        let Handle(path, tree) = handle;
+        let Ok(uri) = Url::from_file_path(&path) else {
+            let msg = format!("invalid file path: {}", path.display());
+            return Err(ResponseError::new(ErrorCode::REQUEST_FAILED, msg));
+        };
+        let location = tree.token_location(token);
+        let line = u32::try_from(location.line).unwrap();
+        let character = u32::try_from(location.column).unwrap();
+        let start = Position::new(line, character);
+        let end = start; // TODO
+        let range = Range::new(start, end);
+        let location = Location::new(uri, range);
+        Ok(Some(GotoTypeDefinitionResponse::Scalar(location)))
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -163,11 +234,11 @@ async fn main() {
             env: Env::find().expect("unable to find Zig"),
         });
         router
-            .request::<request::Initialize, _>(|_, params| async move {
+            .request::<request::Initialize, _>(|_, params| async {
                 Ok(InitializeResult {
                     capabilities: ServerCapabilities {
                         hover_provider: Some(HoverProviderCapability::Simple(true)),
-                        // definition_provider: Some(OneOf::Left(true)),
+                        definition_provider: Some(OneOf::Left(true)),
                         text_document_sync: Some(TextDocumentSyncCapability::Kind(
                             TextDocumentSyncKind::FULL,
                         )),
@@ -178,7 +249,7 @@ async fn main() {
             })
             .request::<request::HoverRequest, _>(|server, params| {
                 let result = server.hover(params);
-                async move {
+                async {
                     let Some(s) = result? else {
                         return Ok(None);
                     };
@@ -187,9 +258,9 @@ async fn main() {
                     Ok(Some(Hover { contents, range }))
                 }
             })
-            .request::<request::GotoDefinition, _>(|_, _| async {
-                let msg = "Not yet implemented!";
-                Err(ResponseError::new(ErrorCode::REQUEST_FAILED, msg))
+            .request::<request::GotoDefinition, _>(|server, params| {
+                let result = server.goto_definition(params);
+                async { result }
             })
             .request::<request::Shutdown, _>(|_, _| async { Ok(()) })
             .notification::<notification::Initialized>(|_, _| ControlFlow::Continue(()))
