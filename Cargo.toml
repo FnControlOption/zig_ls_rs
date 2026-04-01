@@ -1,0 +1,20 @@
+[package]
+name = "zig_ls"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-lsp = { version = "0.2", features = ["tokio"] }
+# lsp-server = "0.7"
+lsp-types = "0.95"
+tokio = { version = "1.50", features = ["io-std", "io-util", "macros", "process", "rt", "time"] }
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+zig_analyzer = { path = "../zig_analyzer" }
+zig_ast = { path = "../zig_ast" }
+
+[dev-dependencies]
+assert2 = "0.4"
+docstr = "0.4"
+tempfile = "3"
