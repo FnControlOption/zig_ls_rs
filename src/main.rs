@@ -79,7 +79,7 @@ impl Server {
         self.cache.clear();
     }
 
-    fn foobar(
+    fn get_enclosing(
         &mut self,
         params: TextDocumentPositionParams,
     ) -> Result<(Node, Node, TokenIndex), ResponseError> {
@@ -97,12 +97,14 @@ impl Server {
 
         let tree = document.tree().clone();
         let Position { line, character } = params.position;
-        let token_index = document.position_to_token(line, character);
+        const PREFERRED_TOKENS: &[TokenTag] =
+            &[TokenTag::Identifier, TokenTag::Builtin, TokenTag::Period];
+        let token_index = document.position_to_token(line, character, PREFERRED_TOKENS);
         let Some(container) = document.enclosing_container(token_index) else {
             let msg = format!("failed to find enclosing container at ({line}, {character})");
             return Err(ResponseError::new(ErrorCode::REQUEST_FAILED, msg));
         };
-        let Some(doc_node) = document.enclosing_nodes(token_index).last() else {
+        let Some(doc_node) = container.enclosing_nodes(&tree, token_index).last() else {
             let msg = format!("failed to find enclosing node at ({line}, {character})");
             return Err(ResponseError::new(ErrorCode::REQUEST_FAILED, msg));
         };
@@ -115,7 +117,7 @@ impl Server {
     }
 
     fn hover(&mut self, params: HoverParams) -> Result<Option<String>, ResponseError> {
-        let (this, node, token_index) = self.foobar(params.text_document_position_params)?;
+        let (this, node, token_index) = self.get_enclosing(params.text_document_position_params)?;
 
         let mut analyzer = self.analyzer(this);
         let mut member_info = None;
@@ -172,7 +174,7 @@ impl Server {
         &mut self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoTypeDefinitionResponse>, ResponseError> {
-        let (this, node, token_index) = self.foobar(params.text_document_position_params)?;
+        let (this, node, token_index) = self.get_enclosing(params.text_document_position_params)?;
 
         let mut analyzer = self.analyzer(this);
         let mut member_info = None;
