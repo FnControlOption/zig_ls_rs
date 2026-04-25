@@ -223,7 +223,7 @@ impl Server {
 async fn main() {
     let args: Vec<_> = std::env::args().collect();
     if args.len() > 1 && &args[1..] == ["--version"] {
-        println!("0.15.2");
+        println!("0.16.0");
         return;
     }
 
