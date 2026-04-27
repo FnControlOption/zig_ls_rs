@@ -45,13 +45,12 @@ struct Server {
 }
 
 impl Server {
-    fn analyzer(&mut self, this: Node) -> Analyzer<'_, '_, '_, '_> {
+    fn analyzer(&mut self) -> Analyzer<'_, '_, '_, '_> {
         Analyzer {
             ip: &mut self.ip,
             cache: &mut self.cache,
             documents: &mut self.documents,
             std_dir: Some(&self.env.std_dir),
-            this,
         }
     }
 
@@ -82,7 +81,7 @@ impl Server {
     fn get_enclosing(
         &mut self,
         params: TextDocumentPositionParams,
-    ) -> Result<(Node, Node, TokenIndex), ResponseError> {
+    ) -> Result<(Node, TokenIndex), ResponseError> {
         let uri = params.text_document.uri;
         let Ok(path) = uri.to_file_path() else {
             let msg = format!("invalid file path: {uri}");
@@ -110,16 +109,15 @@ impl Server {
         };
 
         let handle = Handle(path.clone(), tree.clone());
-        let this = Node(handle.clone(), container.index);
         let node = Node(handle.clone(), doc_node.index);
 
-        Ok((this, node, token_index))
+        Ok((node, token_index))
     }
 
     fn hover(&mut self, params: HoverParams) -> Result<Option<String>, ResponseError> {
-        let (this, node, token_index) = self.get_enclosing(params.text_document_position_params)?;
+        let (node, token_index) = self.get_enclosing(params.text_document_position_params)?;
 
-        let mut analyzer = self.analyzer(this);
+        let mut analyzer = self.analyzer();
         let mut member_info = None;
         let opt_expr = analyzer.resolve_from_token(&node, token_index, Some(&mut member_info));
         let Some(expr) = opt_expr else {
@@ -158,13 +156,12 @@ impl Server {
                 s.push_str("```zig\n(type)\n```\n");
             }
             Expr(ty, Value::Runtime | Value::Unknown | Value::Type(Type::Unknown)) => {
-                let ty = ty.display(&self.ip);
-                let _ = write!(s, "```zig\n({ty})\n```\n");
+                let _ = write!(s, "```zig\n({})\n```\n", ty.display(&self.ip));
             }
             Expr(ty, val) => {
                 let ty = ty.display(&self.ip);
                 let val = val.display(&self.ip);
-                let _ = write!(s, "```zig\n({ty} = {val})\n```\n",);
+                let _ = write!(s, "```zig\n({ty} = {val})\n```\n");
             }
         }
         Ok(Some(s))
@@ -174,9 +171,9 @@ impl Server {
         &mut self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoTypeDefinitionResponse>, ResponseError> {
-        let (this, node, token_index) = self.get_enclosing(params.text_document_position_params)?;
+        let (node, token_index) = self.get_enclosing(params.text_document_position_params)?;
 
-        let mut analyzer = self.analyzer(this);
+        let mut analyzer = self.analyzer();
         let mut member_info = None;
         let opt_expr = analyzer.resolve_from_token(&node, token_index, Some(&mut member_info));
         let Some(expr) = opt_expr else {
