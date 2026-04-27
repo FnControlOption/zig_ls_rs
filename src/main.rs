@@ -158,6 +158,11 @@ impl Server {
             Expr(ty, Value::Runtime | Value::Unknown | Value::Type(Type::Unknown)) => {
                 let _ = write!(s, "```zig\n({})\n```\n", ty.display(&self.ip));
             }
+            Expr(ty, Value::Interned(index))
+                if let Some(InternedValue::Function(_)) = self.ip.get_value(index) =>
+            {
+                let _ = write!(s, "```zig\n({})\n```\n", ty.display(&self.ip));
+            }
             Expr(ty, val) => {
                 let ty = ty.display(&self.ip);
                 let val = val.display(&self.ip);
